@@ -1,45 +1,14 @@
-# Telegram Business Bot
+# Telegram Business Bot — fixed build
 
-Python 3.11+ bot using aiogram 3 and the official Telegram Business Bot API.
+## Setup
+1. Set `BOT_TOKEN` and `ADMIN_IDS` in the host's Environment Variables.
+2. Install command: `pip install -r requirements.txt`
+3. Start command: `python bot.py`
+4. Connect the bot in Telegram Business settings and grant only the permissions you need.
 
-## Features
-- Admin-only commands: `/admin`, `/status`, `/connections`, `/events`
-- Notifications to configured admin IDs when a Business connection is enabled/disabled
-- Watches Business messages for the exact text `.ofer`
-- Attempts to delete the command and sends **привет, как твои дела?** with two inline buttons
-- Logs button choices and important events in SQLite
-- Docker / Docker Compose support
+## Admin commands
+`/admin`, `/status`, `/connections`, `/events`
 
-## Setup (VPS)
-1. Create a bot with [@BotFather](https://t.me/BotFather), copy its token.
-2. Find your numeric Telegram user ID (e.g. via a trusted ID bot).
-3. Upload/unzip this project on your server.
-4. Create `.env` from the example:
-   ```bash
-   cp .env.example .env
-   nano .env
-   ```
-   Set `BOT_TOKEN` and `ADMIN_IDS` (comma-separated numeric IDs).
-5. Install and run:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   python bot.py
-   ```
-   Or with Docker:
-   ```bash
-   docker compose up -d --build
-   docker compose logs -f
-   ```
+The app notifies configured admins about Business connections and disconnections. It watches Business messages for the exact `.ofer` command, attempts to delete it if Telegram permissions allow, then replies with bold text and two inline buttons. Button actions are logged and reported to admins.
 
-## Telegram Business setup
-In Telegram, the account owner must connect the bot through Telegram Business settings and explicitly grant the rights it needs. Availability of Business features depends on Telegram client/account/API support and the rights granted. Test on an account you own or have explicit permission to manage.
-
-## Notes / limitations
-- The bot cannot add itself to an account or grant itself rights. The account owner must connect it.
-- Deleting `.ofer` is best-effort and requires the appropriate permission/API support. If deletion fails, the bot logs the failure and still attempts to reply.
-- Inline button presses are logged and the buttons are removed after the first press. Admins receive a notification.
-- Telegram may restrict sending messages via a Business connection based on the connection's rights and chat eligibility.
-- Keep `.env` private; never share your bot token. If leaked, revoke it with BotFather.
-- This project is a starter implementation; validate it with your current Telegram Bot API/aiogram version before production use.
+The unavailable `dp.business_messages_deleted()` decorator was removed to fix the startup crash in the screenshot. Keep the token private. Test on an account you own or are authorized to manage.

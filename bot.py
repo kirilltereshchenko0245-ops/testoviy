@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import sqlite3
@@ -8,23 +9,19 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    BusinessConnection, BusinessMessagesDeleted, BusinessBotRights
-)
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BusinessConnection
 from dotenv import load_dotenv
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 DB_PATH = os.getenv("DB_PATH", "bot.db")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("business-bot")
 
 if not TOKEN:
     raise RuntimeError("Set BOT_TOKEN in .env")
-if not ADMIN_IDS:
-    log.warning("ADMIN_IDS is empty. Admin commands will be unavailable.")
 
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -36,7 +33,12 @@ def db():
     return conn
 
 
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def init_db():
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     with db() as c:
         c.execute("""CREATE TABLE IF NOT EXISTS connections (
             connection_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
@@ -52,13 +54,13 @@ def init_db():
         )""")
 
 
-def now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
 def event(kind, details):
     with db() as c:
         c.execute("INSERT INTO events(created_at,kind,details) VALUES(?,?,?)", (now(), kind, details))
+
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 
 async def notify_admins(text: str):
@@ -69,10 +71,6 @@ async def notify_admins(text: str):
             log.exception("Could not notify admin %s", admin_id)
 
 
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-
 def offer_keyboard(connection_id: str, chat_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Принять слова", callback_data=f"offer:accept:{connection_id}:{chat_id}"),
@@ -80,19 +78,41 @@ def offer_keyboard(connection_id: str, chat_id: int):
     ]])
 
 
+def render_connections():
+    with db() as c:
+        rows = c.execute("SELECT * FROM connections ORDER BY updated_at DESC LIMIT 20").fetchall()
+    if not rows:
+        return "Подключений пока нет."
+    lines = ["<b>Business-подключения</b>"]
+    for r in rows:
+        state = "активно" if r["is_enabled"] else "отключено"
+        lines.append(
+            f"• ID <code>{r['connection_id']}</code> — user <code>{r['user_id']}</code> — {state}\n"
+            f"  Права: <code>{(r['rights'] or 'не указаны')[:180]}</code>"
+        )
+    return "\n".join(lines)
+
+
+def render_events():
+    with db() as c:
+        rows = c.execute("SELECT * FROM events ORDER BY id DESC LIMIT 10").fetchall()
+    if not rows:
+        return "Событий пока нет."
+    return "<b>Последние события</b>\n" + "\n".join(
+        f"• {r['created_at']} — <b>{r['kind']}</b>: {r['details'][:250]}" for r in rows
+    )
+
+
 @dp.message(CommandStart())
 async def start(message: Message):
     if message.from_user and is_admin(message.from_user.id):
         await message.answer(
-            "Бот запущен.\n\n"
-            "Команды администратора:\n"
-            "/admin — панель управления\n"
-            "/status — состояние и подключения\n"
-            "/connections — список Business-подключений\n"
-            "/events — последние события"
+            "Бот запущен.\n\nКоманды администратора:\n"
+            "/admin — панель управления\n/status — состояние и подключения\n"
+            "/connections — список Business-подключений\n/events — последние события"
         )
     else:
-        await message.answer("Бот работает в поддерживаемых Telegram Business-чатах после подключения владельцем аккаунта.")
+        await message.answer("Бот работает в Telegram Business после подключения владельцем аккаунта.")
 
 
 @dp.message(Command("admin"))
@@ -114,49 +134,25 @@ async def status(message: Message):
     with db() as c:
         total = c.execute("SELECT COUNT(*) n FROM connections").fetchone()["n"]
         active = c.execute("SELECT COUNT(*) n FROM connections WHERE is_enabled=1").fetchone()["n"]
-        events_count = c.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
-    await message.answer(f"<b>Статус</b>\nПодключений всего: {total}\nАктивных: {active}\nСобытий в журнале: {events_count}")
+        count = c.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
+    await message.answer(f"<b>Статус</b>\nПодключений: {total}\nАктивных: {active}\nСобытий: {count}")
 
 
 @dp.message(Command("connections"))
 async def connections_cmd(message: Message):
-    if not message.from_user or not is_admin(message.from_user.id):
-        return
-    await message.answer(render_connections())
+    if message.from_user and is_admin(message.from_user.id):
+        await message.answer(render_connections())
 
 
 @dp.message(Command("events"))
 async def events_cmd(message: Message):
-    if not message.from_user or not is_admin(message.from_user.id):
-        return
-    await message.answer(render_events())
-
-
-def render_connections():
-    with db() as c:
-        rows = c.execute("SELECT * FROM connections ORDER BY updated_at DESC LIMIT 20").fetchall()
-    if not rows:
-        return "Подключений пока нет."
-    lines = ["<b>Business-подключения</b>"]
-    for r in rows:
-        state = "активно" if r["is_enabled"] else "отключено"
-        lines.append(f"• ID <code>{r['connection_id']}</code> — user <code>{r['user_id']}</code> — {state}\n  Права: <code>{(r['rights'] or 'не указаны')[:180]}</code>")
-    return "\n".join(lines)
-
-
-def render_events():
-    with db() as c:
-        rows = c.execute("SELECT * FROM events ORDER BY id DESC LIMIT 10").fetchall()
-    if not rows:
-        return "Событий пока нет."
-    return "<b>Последние события</b>\n" + "\n".join(
-        f"• {r['created_at']} — <b>{r['kind']}</b>: {r['details'][:250]}" for r in rows
-    )
+    if message.from_user and is_admin(message.from_user.id):
+        await message.answer(render_events())
 
 
 @dp.callback_query(F.data.startswith("admin:"))
 async def admin_buttons(call: CallbackQuery):
-    if not call.from_user or not is_admin(call.from_user.id):
+    if not is_admin(call.from_user.id):
         await call.answer("Нет доступа", show_alert=True)
         return
     action = call.data.split(":")[1]
@@ -164,7 +160,7 @@ async def admin_buttons(call: CallbackQuery):
         with db() as c:
             total = c.execute("SELECT COUNT(*) n FROM connections").fetchone()["n"]
             active = c.execute("SELECT COUNT(*) n FROM connections WHERE is_enabled=1").fetchone()["n"]
-        text = f"<b>Статус</b>\nПодключений всего: {total}\nАктивных: {active}"
+        text = f"<b>Статус</b>\nПодключений: {total}\nАктивных: {active}"
     elif action == "connections":
         text = render_connections()
     else:
@@ -181,7 +177,6 @@ async def business_connection_handler(connection: BusinessConnection):
         "is_enabled": connection.is_enabled,
         "user_chat_id": connection.user_chat_id,
     }
-    import json
     rights_text = json.dumps(rights, ensure_ascii=False)
     with db() as c:
         c.execute("""INSERT INTO connections(connection_id,user_id,is_enabled,rights,updated_at)
@@ -201,7 +196,6 @@ async def business_connection_handler(connection: BusinessConnection):
 
 @dp.business_message()
 async def business_message_handler(message: Message):
-    # Only act on explicit .ofer messages, in chats belonging to an enabled Business connection.
     text = (message.text or message.caption or "").strip()
     if text.lower() != ".ofer":
         return
@@ -212,15 +206,14 @@ async def business_message_handler(message: Message):
         row = c.execute("SELECT is_enabled FROM connections WHERE connection_id=?", (connection_id,)).fetchone()
     if not row or not row["is_enabled"]:
         return
-    # Telegram requires appropriate business rights for deleting messages and replying.
     try:
         await bot.delete_business_messages(
             business_connection_id=connection_id,
             message_ids=[message.message_id]
         )
-    except Exception as e:
-        log.warning("Could not delete .ofer message (rights/API limitation): %s", e)
-        event("delete_command_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={e}")
+    except Exception as exc:
+        log.warning("Could not delete .ofer (check Business rights/API support): %s", exc)
+        event("delete_command_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={exc}")
     try:
         await bot.send_message(
             chat_id=message.chat.id,
@@ -229,14 +222,13 @@ async def business_message_handler(message: Message):
             reply_markup=offer_keyboard(connection_id, message.chat.id)
         )
         event("offer_sent", f"connection_id={connection_id}; chat_id={message.chat.id}")
-    except Exception as e:
-        log.exception("Could not send business offer")
-        event("offer_send_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={e}")
+    except Exception as exc:
+        log.exception("Could not send Business reply")
+        event("offer_send_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={exc}")
 
 
 @dp.callback_query(F.data.startswith("offer:"))
 async def offer_callback(call: CallbackQuery):
-    # These buttons are callbacks in the bot chat context. Record the response.
     parts = (call.data or "").split(":")
     if len(parts) != 4:
         await call.answer("Не удалось обработать действие.", show_alert=True)
@@ -249,7 +241,6 @@ async def offer_callback(call: CallbackQuery):
                   (now(), call.from_user.id, connection_id, action, chat_id))
     event("button_action", f"user_id={call.from_user.id}; action={action}; connection_id={connection_id}; chat_id={chat_id}")
     await call.answer("Ваш выбор записан.")
-    # Buttons are acknowledged and logged. No unsolicited message is sent to anyone.
     if call.message:
         try:
             await call.message.edit_reply_markup(reply_markup=None)
@@ -261,18 +252,14 @@ async def offer_callback(call: CallbackQuery):
     )
 
 
-@dp.business_messages_deleted()
-async def deleted_messages_handler(update: BusinessMessagesDeleted):
-    event("business_messages_deleted", f"connection_id={update.business_connection_id}; chat_id={update.chat.id}; ids={update.message_ids}")
-
-
 async def main():
     init_db()
     me = await bot.get_me()
     log.info("Starting @%s", me.username)
+    # Removed dp.business_messages_deleted(): it is not available in some aiogram versions
     await dp.start_polling(
         bot,
-        allowed_updates=["message", "callback_query", "business_connection", "business_message", "edited_business_message", "deleted_business_messages"]
+        allowed_updates=["message", "callback_query", "business_connection", "business_message", "edited_business_message"]
     )
 
 
