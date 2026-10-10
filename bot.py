@@ -242,9 +242,9 @@ async def business_message_handler(message: Message):
     # .2ofer https://... 500       -> plain offer text + buttons, no NFT link/preview
     # .3ofer https://... 500       -> formatted full card, title links to NFT
     # .4ofer https://... 500       -> unformatted full card, no HTML formatting
-    match = re.fullmatch(r"\\.(1|2|3|4)ofer\\s+(\\S+)\\s+(\\d{1,7})", text, flags=re.IGNORECASE)
+    match = re.fullmatch(r"\.(1|2|3|4)ofer\s+(\S+)\s+(\d{1,7})", text, flags=re.IGNORECASE)
     if not match:
-        if re.match(r"\\.(?:[1-4])?ofer\\b", text, flags=re.IGNORECASE):
+        if re.match(r"\.(?:[1-4])?ofer\b", text, flags=re.IGNORECASE):
             event("ofer_usage_error", f"chat_id={message.chat.id}; expected='.1ofer t.me/nft/Slug-123 500' (or .2ofer/.3ofer/.4ofer)")
             log.info("OFER usage: expected .1ofer/.2ofer/.3ofer/.4ofer <NFT URL> <amount>")
         return
@@ -301,16 +301,16 @@ async def business_message_handler(message: Message):
     elif variant == 3:
         # Full formatted offer; NFT title links to the provided NFT page.
         card_text = (
-            f'<b>Предложение NFT</b>\\n\\n'
-            f'<a href="{escaped_url}">{escaped_title}</a>\\n'
-            f'Цена: <b>{amount} ⭐ Telegram Stars</b>\\n\\n'
+            f'<b>Предложение NFT</b>\n\n'
+            f'<a href="{escaped_url}">{escaped_title}</a>\n'
+            f'Цена: <b>{amount} ⭐ Telegram Stars</b>\n\n'
             f'Проверьте подарок и выберите действие.'
         )
     else:
         # Full card without HTML formatting.
         card_text = (
-            f"Предложение NFT\\n\\n{title}\\n"
-            f"Цена: {amount} ⭐ Telegram Stars\\n\\n"
+            f"Предложение NFT\n\n{title}\n"
+            f"Цена: {amount} ⭐ Telegram Stars\n\n"
             f"Проверьте подарок и выберите действие."
         )
 
