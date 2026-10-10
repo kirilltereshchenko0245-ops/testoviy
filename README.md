@@ -1,14 +1,13 @@
-# Telegram Business Bot — fixed build
+# Telegram Business NFT offer bot
 
-## Setup
-1. Set `BOT_TOKEN` and `ADMIN_IDS` in the host's Environment Variables.
-2. Install command: `pip install -r requirements.txt`
-3. Start command: `python bot.py`
-4. Connect the bot in Telegram Business settings and grant only the permissions you need.
+Deploy command: `python bot.py`
+Build/install command: `pip install -r requirements.txt`
 
-## Admin commands
-`/admin`, `/status`, `/connections`, `/events`
+Set `BOT_TOKEN` and `ADMIN_IDS` as environment variables.
 
-The app notifies configured admins about Business connections and disconnections. It watches Business messages for the exact `.ofer` command, attempts to delete it if Telegram permissions allow, then replies with bold text and two inline buttons. Button actions are logged and reported to admins.
+In a Business chat, use:
+`.ofer https://your-nft-link.example/item/123 500`
 
-The unavailable `dp.business_messages_deleted()` decorator was removed to fix the startup crash in the screenshot. Keep the token private. Test on an account you own or are authorized to manage.
+The bot attempts to delete the command (requires Telegram permissions), then sends a custom NFT link-preview offer with a stated price in Telegram Stars and Accept/Decline buttons. It does not create an actual Telegram marketplace transaction or transfer an NFT/Stars. Button presses are logged and admins are notified.
+
+The NFT link preview is supplied by Telegram from the URL's page metadata; a preview may not appear for every URL. Test only with chats/accounts you are authorized to manage.

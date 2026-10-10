@@ -2,26 +2,30 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BusinessConnection
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    BusinessConnection, LinkPreviewOptions
+)
 from dotenv import load_dotenv
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 DB_PATH = os.getenv("DB_PATH", "bot.db")
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("business-bot")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("business-nft-offer")
 
 if not TOKEN:
-    raise RuntimeError("Set BOT_TOKEN in .env")
+    raise RuntimeError("Set BOT_TOKEN in environment variables")
 
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -40,18 +44,16 @@ def now():
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     with db() as c:
-        c.execute("""CREATE TABLE IF NOT EXISTS connections (
+        c.execute("""CREATE TABLE IF NOT EXISTS connections(
             connection_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
-            is_enabled INTEGER NOT NULL, rights TEXT, updated_at TEXT NOT NULL
-        )""")
-        c.execute("""CREATE TABLE IF NOT EXISTS events (
+            is_enabled INTEGER NOT NULL, rights TEXT, updated_at TEXT NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS events(
             id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
-            kind TEXT NOT NULL, details TEXT NOT NULL
-        )""")
-        c.execute("""CREATE TABLE IF NOT EXISTS button_actions (
+            kind TEXT NOT NULL, details TEXT NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS button_actions(
             id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
-            user_id INTEGER, connection_id TEXT, action TEXT NOT NULL, chat_id INTEGER
-        )""")
+            user_id INTEGER, connection_id TEXT, action TEXT NOT NULL,
+            chat_id INTEGER, nft_url TEXT, amount INTEGER)""")
 
 
 def event(kind, details):
@@ -59,22 +61,27 @@ def event(kind, details):
         c.execute("INSERT INTO events(created_at,kind,details) VALUES(?,?,?)", (now(), kind, details))
 
 
-def is_admin(user_id: int) -> bool:
+def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
-async def notify_admins(text: str):
-    for admin_id in ADMIN_IDS:
+async def notify_admins(text):
+    for uid in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, text)
+            await bot.send_message(uid, text)
         except Exception:
-            log.exception("Could not notify admin %s", admin_id)
+            log.exception("Could not notify admin %s", uid)
 
 
-def offer_keyboard(connection_id: str, chat_id: int):
+def safe_url(raw):
+    parsed = urlparse(raw)
+    return raw if parsed.scheme in ("https", "http") and parsed.netloc else None
+
+
+def offer_keyboard(connection_id, chat_id, amount):
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Принять слова", callback_data=f"offer:accept:{connection_id}:{chat_id}"),
-        InlineKeyboardButton(text="Отказаться от слов", callback_data=f"offer:decline:{connection_id}:{chat_id}")
+        InlineKeyboardButton(text="Отклонить", callback_data=f"nft:decline:{connection_id}:{chat_id}:{amount}"),
+        InlineKeyboardButton(text="Принять", callback_data=f"nft:accept:{connection_id}:{chat_id}:{amount}")
     ]])
 
 
@@ -83,23 +90,19 @@ def render_connections():
         rows = c.execute("SELECT * FROM connections ORDER BY updated_at DESC LIMIT 20").fetchall()
     if not rows:
         return "Подключений пока нет."
-    lines = ["<b>Business-подключения</b>"]
-    for r in rows:
-        state = "активно" if r["is_enabled"] else "отключено"
-        lines.append(
-            f"• ID <code>{r['connection_id']}</code> — user <code>{r['user_id']}</code> — {state}\n"
-            f"  Права: <code>{(r['rights'] or 'не указаны')[:180]}</code>"
-        )
-    return "\n".join(lines)
+    return "<b>Business-подключения</b>\n" + "\n".join(
+        f"• <code>{r['connection_id']}</code> user=<code>{r['user_id']}</code> active={r['is_enabled']}"
+        for r in rows
+    )
 
 
 def render_events():
     with db() as c:
-        rows = c.execute("SELECT * FROM events ORDER BY id DESC LIMIT 10").fetchall()
+        rows = c.execute("SELECT * FROM events ORDER BY id DESC LIMIT 15").fetchall()
     if not rows:
         return "Событий пока нет."
     return "<b>Последние события</b>\n" + "\n".join(
-        f"• {r['created_at']} — <b>{r['kind']}</b>: {r['details'][:250]}" for r in rows
+        f"• {r['created_at']} — <b>{r['kind']}</b>: {r['details'][:220]}" for r in rows
     )
 
 
@@ -107,12 +110,12 @@ def render_events():
 async def start(message: Message):
     if message.from_user and is_admin(message.from_user.id):
         await message.answer(
-            "Бот запущен.\n\nКоманды администратора:\n"
-            "/admin — панель управления\n/status — состояние и подключения\n"
-            "/connections — список Business-подключений\n/events — последние события"
+            "Бот запущен.\n/admin — панель\n/status — статус\n"
+            "/connections — подключения\n/events — журнал\n\n"
+            "В Business-чате отправьте: <code>.ofer https://ссылка-на-nft 500</code>"
         )
     else:
-        await message.answer("Бот работает в Telegram Business после подключения владельцем аккаунта.")
+        await message.answer("Бот работает после подключения владельцем Telegram Business.")
 
 
 @dp.message(Command("admin"))
@@ -124,7 +127,7 @@ async def admin(message: Message):
          InlineKeyboardButton(text="Подключения", callback_data="admin:connections")],
         [InlineKeyboardButton(text="Последние события", callback_data="admin:events")]
     ])
-    await message.answer("<b>Панель администратора</b>\nВыберите раздел:", reply_markup=kb)
+    await message.answer("<b>Панель администратора</b>", reply_markup=kb)
 
 
 @dp.message(Command("status"))
@@ -134,8 +137,7 @@ async def status(message: Message):
     with db() as c:
         total = c.execute("SELECT COUNT(*) n FROM connections").fetchone()["n"]
         active = c.execute("SELECT COUNT(*) n FROM connections WHERE is_enabled=1").fetchone()["n"]
-        count = c.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
-    await message.answer(f"<b>Статус</b>\nПодключений: {total}\nАктивных: {active}\nСобытий: {count}")
+    await message.answer(f"<b>Статус</b>\nПодключений: {total}\nАктивных: {active}")
 
 
 @dp.message(Command("connections"))
@@ -179,18 +181,15 @@ async def business_connection_handler(connection: BusinessConnection):
     }
     rights_text = json.dumps(rights, ensure_ascii=False)
     with db() as c:
-        c.execute("""INSERT INTO connections(connection_id,user_id,is_enabled,rights,updated_at)
-        VALUES(?,?,?,?,?) ON CONFLICT(connection_id) DO UPDATE SET
-        user_id=excluded.user_id,is_enabled=excluded.is_enabled,rights=excluded.rights,updated_at=excluded.updated_at""",
-        (connection.id, connection.user.id, int(connection.is_enabled), rights_text, now()))
-    kind = "business_connected" if connection.is_enabled else "business_disconnected"
-    event(kind, f"connection_id={connection.id}; user_id={connection.user.id}; rights={rights_text}")
+        c.execute("""INSERT INTO connections VALUES(?,?,?,?,?) ON CONFLICT(connection_id) DO UPDATE SET
+            user_id=excluded.user_id,is_enabled=excluded.is_enabled,rights=excluded.rights,updated_at=excluded.updated_at""",
+            (connection.id, connection.user.id, int(connection.is_enabled), rights_text, now()))
+    event("business_connected" if connection.is_enabled else "business_disconnected",
+          f"connection_id={connection.id}; user_id={connection.user.id}; rights={rights_text}")
     await notify_admins(
-        f"<b>{'Подключение Telegram Business' if connection.is_enabled else 'Отключение Telegram Business'}</b>\n"
-        f"Пользователь ID: <code>{connection.user.id}</code>\n"
-        f"Connection ID: <code>{connection.id}</code>\n"
-        f"Активно: <b>{'да' if connection.is_enabled else 'нет'}</b>\n"
-        f"Права: <code>{rights_text}</code>"
+        f"<b>{'Подключение' if connection.is_enabled else 'Отключение'} Telegram Business</b>\n"
+        f"Пользователь: <code>{connection.user.id}</code>\n"
+        f"Connection ID: <code>{connection.id}</code>\nПрава: <code>{rights_text}</code>"
     )
 
 
@@ -198,62 +197,83 @@ async def business_connection_handler(connection: BusinessConnection):
 async def business_message_handler(message: Message):
     text = (message.text or message.caption or "").strip()
     connection_id = getattr(message, "business_connection_id", None)
-    log.info("BUSINESS MESSAGE RECEIVED: connection_id=%s chat_id=%s message_id=%s text=%r", connection_id, message.chat.id, message.message_id, text[:200])
-    event("business_message_received", f"connection_id={connection_id}; chat_id={message.chat.id}; message_id={message.message_id}; text={text[:120]!r}")
+    log.info("BUSINESS MESSAGE connection=%s chat=%s text=%r",
+             connection_id, message.chat.id, text[:200])
+    event("business_message_received",
+          f"connection_id={connection_id}; chat_id={message.chat.id}; text={text[:150]!r}")
+
+    # Format: .ofer <NFT URL> <amount in Telegram Stars>
+    match = re.fullmatch(r"\.ofer\s+(https?://\S+)\s+(\d{1,7})", text, flags=re.IGNORECASE)
+    if not match:
+        if text.casefold() == ".ofer":
+            event("ofer_usage_error", f"chat_id={message.chat.id}; expected='.ofer https://NFT-link 500'")
+            log.info("OFER usage: expected .ofer <NFT URL> <amount>")
+        return
+
     if not connection_id:
+        event("ofer_ignored_no_business_connection", f"chat_id={message.chat.id}")
         return
     with db() as c:
         row = c.execute("SELECT is_enabled FROM connections WHERE connection_id=?", (connection_id,)).fetchone()
     if not row or not row["is_enabled"]:
-        log.warning("Business message ignored: connection missing/disabled in DB, connection_id=%s", connection_id)
-        event("message_ignored_connection_unknown", f"connection_id={connection_id}; chat_id={message.chat.id}")
+        event("ofer_ignored_connection_unknown", f"connection_id={connection_id}; chat_id={message.chat.id}")
         return
-    if text.casefold() != ".ofer":
+
+    nft_url = safe_url(match.group(1))
+    amount = int(match.group(2))
+    if not nft_url or amount < 1:
+        event("ofer_invalid", f"chat_id={message.chat.id}")
         return
-    log.info("OFER MATCHED: connection_id=%s chat_id=%s", connection_id, message.chat.id)
+
+    # Best-effort command deletion; still try to send the offer if deletion is not permitted.
     try:
-        await bot.delete_business_messages(
-            business_connection_id=connection_id,
-            message_ids=[message.message_id]
-        )
+        await bot.delete_business_messages(business_connection_id=connection_id, message_ids=[message.message_id])
+        event("ofer_command_deleted", f"connection_id={connection_id}; chat_id={message.chat.id}")
     except Exception as exc:
-        log.warning("Could not delete .ofer (check Business rights/API support): %s", exc)
+        log.warning("Could not delete command: %s", exc)
         event("delete_command_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={exc}")
+
+    caption = (
+        f"<b>Предложение NFT</b>\n\n"
+        f"Вам предлагают NFT по ссылке выше за <b>{amount} ⭐ Telegram Stars</b>.\n"
+        f"Проверьте ссылку и условия перед выбором."
+    )
     try:
         await bot.send_message(
             chat_id=message.chat.id,
             business_connection_id=connection_id,
-            text="<b>привет, как твои дела?</b>",
-            reply_markup=offer_keyboard(connection_id, message.chat.id)
+            text=f"{nft_url}\n\n{caption}",
+            link_preview_options=LinkPreviewOptions(is_disabled=False, show_above_text=True),
+            reply_markup=offer_keyboard(connection_id, message.chat.id, amount)
         )
-        event("offer_sent", f"connection_id={connection_id}; chat_id={message.chat.id}")
+        event("offer_sent", f"connection_id={connection_id}; chat_id={message.chat.id}; amount={amount}; url={nft_url}")
+        log.info("NFT offer sent chat=%s amount=%s", message.chat.id, amount)
     except Exception as exc:
-        log.exception("Could not send Business reply")
+        log.exception("Could not send NFT offer")
         event("offer_send_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={exc}")
 
 
-@dp.callback_query(F.data.startswith("offer:"))
-async def offer_callback(call: CallbackQuery):
+@dp.callback_query(F.data.startswith("nft:"))
+async def nft_callback(call: CallbackQuery):
     parts = (call.data or "").split(":")
-    if len(parts) != 4:
+    if len(parts) != 5:
         await call.answer("Не удалось обработать действие.", show_alert=True)
         return
-    _, action, connection_id, chat_id_raw = parts
-    chat_id = int(chat_id_raw)
-    label = "принять слова" if action == "accept" else "отказаться от слов"
+    _, action, connection_id, chat_raw, amount_raw = parts
+    amount = int(amount_raw)
     with db() as c:
-        c.execute("INSERT INTO button_actions(created_at,user_id,connection_id,action,chat_id) VALUES(?,?,?,?,?)",
-                  (now(), call.from_user.id, connection_id, action, chat_id))
-    event("button_action", f"user_id={call.from_user.id}; action={action}; connection_id={connection_id}; chat_id={chat_id}")
-    await call.answer("Ваш выбор записан.")
+        c.execute("INSERT INTO button_actions(created_at,user_id,connection_id,action,chat_id,nft_url,amount) VALUES(?,?,?,?,?,?,?)",
+                  (now(), call.from_user.id, connection_id, action, int(chat_raw), None, amount))
+    event("nft_offer_button", f"user_id={call.from_user.id}; action={action}; chat_id={chat_raw}; amount={amount}")
+    await call.answer("Выбор записан.")
     if call.message:
         try:
             await call.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
     await notify_admins(
-        f"<b>Нажатие кнопки</b>\nПользователь ID: <code>{call.from_user.id}</code>\n"
-        f"Выбор: <b>{label}</b>\nЧат ID: <code>{chat_id}</code>"
+        f"<b>Ответ на NFT-предложение</b>\nПользователь ID: <code>{call.from_user.id}</code>\n"
+        f"Действие: <b>{'принять' if action == 'accept' else 'отклонить'}</b>\nЦена: <b>{amount} ⭐</b>"
     )
 
 
@@ -261,7 +281,6 @@ async def main():
     init_db()
     me = await bot.get_me()
     log.info("Starting @%s", me.username)
-    # Removed dp.business_messages_deleted(): it is not available in some aiogram versions
     await dp.start_polling(
         bot,
         allowed_updates=["message", "callback_query", "business_connection", "business_message", "edited_business_message"]
