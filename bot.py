@@ -1,11 +1,14 @@
 import asyncio
+import html
 import json
 import logging
 import os
 import re
 import sqlite3
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
+
+import aiohttp
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -13,7 +16,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    BusinessConnection, LinkPreviewOptions
+    BusinessConnection
 )
 from dotenv import load_dotenv
 
@@ -76,6 +79,38 @@ async def notify_admins(text):
 def safe_url(raw):
     parsed = urlparse(raw)
     return raw if parsed.scheme in ("https", "http") and parsed.netloc else None
+
+
+
+async def get_nft_preview(nft_url):
+    """Return public Open Graph image/title, if available."""
+    timeout = aiohttp.ClientTimeout(total=8)
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; NFTOfferBot/1.0)"}
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(nft_url, allow_redirects=True) as response:
+                if response.status != 200:
+                    return None, None
+                content_type = response.headers.get("Content-Type", "")
+                if "html" not in content_type.lower():
+                    return (str(response.url) if content_type.lower().startswith("image/") else None), None
+                page = await response.text(errors="ignore")
+        title, image = None, None
+        for tag in re.findall(r"<meta\b[^>]*>", page, flags=re.IGNORECASE):
+            prop = re.search(r"(?:property|name)\s*=\s*[\"']([^\"']+)[\"']", tag, flags=re.IGNORECASE)
+            content = re.search(r"content\s*=\s*[\"']([^\"']+)[\"']", tag, flags=re.IGNORECASE)
+            if not prop or not content:
+                continue
+            key = prop.group(1).lower()
+            value = html.unescape(content.group(1).strip())
+            if key in ("og:image", "twitter:image") and not image:
+                image = urljoin(nft_url, value)
+            elif key in ("og:title", "twitter:title") and not title:
+                title = value[:150]
+        return image, title
+    except Exception as exc:
+        log.info("Could not fetch NFT preview metadata: %s", exc)
+        return None, None
 
 
 def offer_keyboard(connection_id, chat_id, amount):
@@ -203,9 +238,10 @@ async def business_message_handler(message: Message):
           f"connection_id={connection_id}; chat_id={message.chat.id}; text={text[:150]!r}")
 
     # Format: .ofer <NFT URL> <amount in Telegram Stars>
+    # The URL is used only as command input and is never included in the outgoing card.
     match = re.fullmatch(r"\.ofer\s+(https?://\S+)\s+(\d{1,7})", text, flags=re.IGNORECASE)
     if not match:
-        if text.casefold() == ".ofer":
+        if text.casefold().startswith(".ofer"):
             event("ofer_usage_error", f"chat_id={message.chat.id}; expected='.ofer https://NFT-link 500'")
             log.info("OFER usage: expected .ofer <NFT URL> <amount>")
         return
@@ -233,21 +269,31 @@ async def business_message_handler(message: Message):
         log.warning("Could not delete command: %s", exc)
         event("delete_command_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={exc}")
 
-    caption = (
-        f"<b>Предложение NFT</b>\n\n"
-        f"Вам предлагают NFT по ссылке выше за <b>{amount} ⭐ Telegram Stars</b>.\n"
-        f"Проверьте ссылку и условия перед выбором."
+    image_url, nft_title = await get_nft_preview(nft_url)
+    title_line = f"<b>{html.escape(nft_title)}</b>\\n\\n" if nft_title else "<b>Предложение NFT</b>\\n\\n"
+    card_text = (
+        f"{title_line}"
+        f"Вам предлагают этот NFT за <b>{amount} ⭐ Telegram Stars</b>.\\n\\n"
+        f"Проверьте предложение перед выбором."
     )
     try:
-        await bot.send_message(
-            chat_id=message.chat.id,
-            business_connection_id=connection_id,
-            text=f"{nft_url}\n\n{caption}",
-            link_preview_options=LinkPreviewOptions(is_disabled=False, show_above_text=True),
-            reply_markup=offer_keyboard(connection_id, message.chat.id, amount)
-        )
-        event("offer_sent", f"connection_id={connection_id}; chat_id={message.chat.id}; amount={amount}; url={nft_url}")
-        log.info("NFT offer sent chat=%s amount=%s", message.chat.id, amount)
+        if image_url:
+            await bot.send_photo(
+                chat_id=message.chat.id,
+                business_connection_id=connection_id,
+                photo=image_url,
+                caption=card_text,
+                reply_markup=offer_keyboard(connection_id, message.chat.id, amount)
+            )
+        else:
+            await bot.send_message(
+                chat_id=message.chat.id,
+                business_connection_id=connection_id,
+                text=card_text,
+                reply_markup=offer_keyboard(connection_id, message.chat.id, amount)
+            )
+        event("offer_sent", f"connection_id={connection_id}; chat_id={message.chat.id}; amount={amount}; preview={'yes' if image_url else 'no'}")
+        log.info("NFT offer sent chat=%s amount=%s preview=%s", message.chat.id, amount, bool(image_url))
     except Exception as exc:
         log.exception("Could not send NFT offer")
         event("offer_send_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={exc}")
