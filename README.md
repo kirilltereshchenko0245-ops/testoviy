@@ -1,11 +1,15 @@
 # Telegram Business NFT offer bot
 
-Deploy command: `python bot.py`
-Build/install command: `pip install -r requirements.txt`
+Запуск: `python bot.py`  
+Установка: `pip install -r requirements.txt`
 
-Set `BOT_TOKEN` and `ADMIN_IDS` as environment variables.
+Настройте `BOT_TOKEN` и `ADMIN_IDS` в переменных окружения.
 
-In a Business chat, use:
-`.ofer https://your-nft-link.example/item/123 500`
+Команды в Telegram Business-чате:
 
-The bot attempts to delete the command (requires Telegram permissions), then sends a custom offer card with the NFT page's public image/title when available, the amount in Telegram Stars, and Accept/Decline buttons. The URL itself is not shown in the card text. This is a custom bot message, not Telegram's official native gift card. The command format is `.ofer <NFT URL> 500`. The URL is accepted as command input but is not sent to the recipient or shown in the card. It does not create an actual marketplace transaction or transfer an NFT/Stars. Button presses are logged and admins are notified. Test only with chats/accounts you are authorized to manage.
+- `.1ofer t.me/nft/InstantRamen-142855 500` — карточка с превью NFT (если доступно), название — ссылка на подарок, кнопки «Отклонить» и «Принять». Для этой команды ссылка вводится без `https://`.
+- `.2ofer https://example.com/nft 500` — текстовая карточка без ссылки и изображения NFT.
+- `.3ofer https://example.com/nft 500` — полная форматированная карточка; название NFT является ссылкой на указанный адрес.
+- `.4ofer https://example.com/nft 500` — полная текстовая карточка без HTML-форматирования.
+
+Бот по возможности удаляет исходную команду, затем отправляет карточку. Это пользовательское сообщение бота, а не встроенная официальная карточка Telegram и не реальная транзакция. Кнопки только записывают выбор и уведомляют администраторов; они не принимают NFT и не переводят Stars. Используйте только в чатах и с аккаунтами, которыми вы вправе управлять.

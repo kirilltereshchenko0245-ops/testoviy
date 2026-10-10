@@ -147,7 +147,7 @@ async def start(message: Message):
         await message.answer(
             "Бот запущен.\n/admin — панель\n/status — статус\n"
             "/connections — подключения\n/events — журнал\n\n"
-            "В Business-чате отправьте: <code>.ofer https://ссылка-на-nft 500</code>"
+            "В Business-чате:\\n.1ofer t.me/nft/Slug-123 500 — NFT-карточка\\n.2ofer https://ссылка 500 — только текст\\n.3ofer https://ссылка 500 — полная карточка\\n.4ofer https://ссылка 500 — без форматирования"
         )
     else:
         await message.answer("Бот работает после подключения владельцем Telegram Business.")
@@ -237,13 +237,33 @@ async def business_message_handler(message: Message):
     event("business_message_received",
           f"connection_id={connection_id}; chat_id={message.chat.id}; text={text[:150]!r}")
 
-    # Format: .ofer <NFT URL> <amount in Telegram Stars>
-    # The URL is used only as command input and is never included in the outgoing card.
-    match = re.fullmatch(r"\.ofer\s+(https?://\S+)\s+(\d{1,7})", text, flags=re.IGNORECASE)
+    # Formats:
+    # .1ofer t.me/nft/Slug-123 500  -> NFT preview/title + buttons
+    # .2ofer https://... 500       -> plain offer text + buttons, no NFT link/preview
+    # .3ofer https://... 500       -> formatted full card, title links to NFT
+    # .4ofer https://... 500       -> unformatted full card, no HTML formatting
+    match = re.fullmatch(r"\\.(1|2|3|4)ofer\\s+(\\S+)\\s+(\\d{1,7})", text, flags=re.IGNORECASE)
     if not match:
-        if text.casefold().startswith(".ofer"):
-            event("ofer_usage_error", f"chat_id={message.chat.id}; expected='.ofer https://NFT-link 500'")
-            log.info("OFER usage: expected .ofer <NFT URL> <amount>")
+        if re.match(r"\\.(?:[1-4])?ofer\\b", text, flags=re.IGNORECASE):
+            event("ofer_usage_error", f"chat_id={message.chat.id}; expected='.1ofer t.me/nft/Slug-123 500' (or .2ofer/.3ofer/.4ofer)")
+            log.info("OFER usage: expected .1ofer/.2ofer/.3ofer/.4ofer <NFT URL> <amount>")
+        return
+
+    variant = int(match.group(1))
+    raw_url = match.group(2)
+    amount = int(match.group(3))
+    # Telegram gift links may be entered as t.me/... without a scheme.
+    display_url = ("https://" + raw_url) if raw_url.lower().startswith("t.me/") else raw_url
+    nft_url = safe_url(display_url)
+
+    if variant == 1 and not raw_url.lower().startswith("t.me/"):
+        event("ofer_invalid", f"chat_id={message.chat.id}; variant=1; expected t.me/... link")
+        return
+    if variant in (2, 3, 4) and not raw_url.lower().startswith(("https://", "http://")):
+        event("ofer_invalid", f"chat_id={message.chat.id}; variant={variant}; expected HTTP(S) URL")
+        return
+    if not nft_url or amount < 1:
+        event("ofer_invalid", f"chat_id={message.chat.id}; variant={variant}")
         return
 
     if not connection_id:
@@ -255,12 +275,6 @@ async def business_message_handler(message: Message):
         event("ofer_ignored_connection_unknown", f"connection_id={connection_id}; chat_id={message.chat.id}")
         return
 
-    nft_url = safe_url(match.group(1))
-    amount = int(match.group(2))
-    if not nft_url or amount < 1:
-        event("ofer_invalid", f"chat_id={message.chat.id}")
-        return
-
     # Best-effort command deletion; still try to send the offer if deletion is not permitted.
     try:
         await bot.delete_business_messages(business_connection_id=connection_id, message_ids=[message.message_id])
@@ -269,35 +283,60 @@ async def business_message_handler(message: Message):
         log.warning("Could not delete command: %s", exc)
         event("delete_command_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={exc}")
 
-    image_url, nft_title = await get_nft_preview(nft_url)
-    title_line = f"<b>{html.escape(nft_title)}</b>\\n\\n" if nft_title else "<b>Предложение NFT</b>\\n\\n"
-    card_text = (
-        f"{title_line}"
-        f"Вам предлагают этот NFT за <b>{amount} ⭐ Telegram Stars</b>.\\n\\n"
-        f"Проверьте предложение перед выбором."
-    )
+    image_url, nft_title = (None, None)
+    if variant in (1, 3):
+        image_url, nft_title = await get_nft_preview(nft_url)
+
+    title = nft_title or "NFT-подарок"
+    escaped_title = html.escape(title)
+    escaped_url = html.escape(display_url, quote=True)
+    keyboard = offer_keyboard(connection_id, message.chat.id, amount)
+
+    if variant == 1:
+        # Preview-only NFT card: title is a visible hyperlink to the Telegram gift.
+        card_text = f'<a href="{escaped_url}">{escaped_title}</a>'
+    elif variant == 2:
+        # Text-only card, without a title/link to the NFT or NFT preview.
+        card_text = f"Пользователь предлагает NFT: {title} за {amount} ⭐ Telegram Stars.\nВыберите действие ниже."
+    elif variant == 3:
+        # Full formatted offer; NFT title links to the provided NFT page.
+        card_text = (
+            f'<b>Предложение NFT</b>\\n\\n'
+            f'<a href="{escaped_url}">{escaped_title}</a>\\n'
+            f'Цена: <b>{amount} ⭐ Telegram Stars</b>\\n\\n'
+            f'Проверьте подарок и выберите действие.'
+        )
+    else:
+        # Full card without HTML formatting.
+        card_text = (
+            f"Предложение NFT\\n\\n{title}\\n"
+            f"Цена: {amount} ⭐ Telegram Stars\\n\\n"
+            f"Проверьте подарок и выберите действие."
+        )
+
     try:
-        if image_url:
+        # Variant 2 and 4 intentionally do not attach the NFT preview image.
+        if image_url and variant in (1, 3):
             await bot.send_photo(
                 chat_id=message.chat.id,
                 business_connection_id=connection_id,
                 photo=image_url,
                 caption=card_text,
-                reply_markup=offer_keyboard(connection_id, message.chat.id, amount)
+                reply_markup=keyboard
             )
         else:
             await bot.send_message(
                 chat_id=message.chat.id,
                 business_connection_id=connection_id,
                 text=card_text,
-                reply_markup=offer_keyboard(connection_id, message.chat.id, amount)
+                reply_markup=keyboard,
+                parse_mode=None if variant == 4 else ParseMode.HTML
             )
-        event("offer_sent", f"connection_id={connection_id}; chat_id={message.chat.id}; amount={amount}; preview={'yes' if image_url else 'no'}")
-        log.info("NFT offer sent chat=%s amount=%s preview=%s", message.chat.id, amount, bool(image_url))
+        event("offer_sent", f"connection_id={connection_id}; chat_id={message.chat.id}; variant={variant}; amount={amount}; preview={'yes' if image_url and variant in (1, 3) else 'no'}")
+        log.info("NFT offer sent chat=%s variant=%s amount=%s", message.chat.id, variant, amount)
     except Exception as exc:
         log.exception("Could not send NFT offer")
-        event("offer_send_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={exc}")
-
+        event("offer_send_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; variant={variant}; error={exc}")
 
 @dp.callback_query(F.data.startswith("nft:"))
 async def nft_callback(call: CallbackQuery):
