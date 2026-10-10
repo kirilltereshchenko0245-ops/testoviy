@@ -197,15 +197,20 @@ async def business_connection_handler(connection: BusinessConnection):
 @dp.business_message()
 async def business_message_handler(message: Message):
     text = (message.text or message.caption or "").strip()
-    if text.lower() != ".ofer":
-        return
     connection_id = getattr(message, "business_connection_id", None)
+    log.info("BUSINESS MESSAGE RECEIVED: connection_id=%s chat_id=%s message_id=%s text=%r", connection_id, message.chat.id, message.message_id, text[:200])
+    event("business_message_received", f"connection_id={connection_id}; chat_id={message.chat.id}; message_id={message.message_id}; text={text[:120]!r}")
     if not connection_id:
         return
     with db() as c:
         row = c.execute("SELECT is_enabled FROM connections WHERE connection_id=?", (connection_id,)).fetchone()
     if not row or not row["is_enabled"]:
+        log.warning("Business message ignored: connection missing/disabled in DB, connection_id=%s", connection_id)
+        event("message_ignored_connection_unknown", f"connection_id={connection_id}; chat_id={message.chat.id}")
         return
+    if text.casefold() != ".ofer":
+        return
+    log.info("OFER MATCHED: connection_id=%s chat_id=%s", connection_id, message.chat.id)
     try:
         await bot.delete_business_messages(
             business_connection_id=connection_id,
