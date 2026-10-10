@@ -237,123 +237,70 @@ async def business_message_handler(message: Message):
     event("business_message_received",
           f"connection_id={connection_id}; chat_id={message.chat.id}; text={text[:150]!r}")
 
-    # Commands .1ofer ... .10ofer; amount is required.
-    match = re.fullmatch(r"\.(10|[1-9])ofer\s+(\S+)\s+(\d{1,7})", text, flags=re.IGNORECASE)
+    # Single command: .offer <NFT URL> <amount>
+    match = re.fullmatch(r"\.offer\s+(https?://\S+|t\.me/\S+)\s+(\d{1,7})", text, flags=re.IGNORECASE)
     if not match:
-        if re.match(r"\.\d+ofer\b", text, flags=re.IGNORECASE):
-            event("ofer_usage_error", f"chat_id={message.chat.id}; expected='.N o fer <URL> <amount>'")
+        if re.match(r"\.offer\b", text, flags=re.IGNORECASE):
+            event("offer_usage_error", f"chat_id={message.chat.id}; expected='.offer https://t.me/nft/Slug-123 50'")
         return
 
-    variant = int(match.group(1))
-    raw_url = match.group(2)
-    amount = int(match.group(3))
+    raw_url = match.group(1)
+    amount = int(match.group(2))
     display_url = ("https://" + raw_url) if raw_url.lower().startswith("t.me/") else raw_url
     nft_url = safe_url(display_url)
-
-    if variant == 1 and not raw_url.lower().startswith("t.me/"):
-        event("ofer_invalid", f"chat_id={message.chat.id}; variant=1; expected t.me/... link")
-        return
-    if variant != 1 and not raw_url.lower().startswith(("https://", "http://")):
-        event("ofer_invalid", f"chat_id={message.chat.id}; variant={variant}; expected HTTP(S) URL")
-        return
     if not nft_url or amount < 1:
-        event("ofer_invalid", f"chat_id={message.chat.id}; variant={variant}")
+        event("offer_invalid", f"chat_id={message.chat.id}; url_valid={bool(nft_url)}; amount={amount}")
         return
     if not connection_id:
-        event("ofer_ignored_no_business_connection", f"chat_id={message.chat.id}")
+        event("offer_ignored_no_business_connection", f"chat_id={message.chat.id}")
         return
     with db() as c:
         row = c.execute("SELECT is_enabled FROM connections WHERE connection_id=?", (connection_id,)).fetchone()
     if not row or not row["is_enabled"]:
-        event("ofer_ignored_connection_unknown", f"connection_id={connection_id}; chat_id={message.chat.id}")
+        event("offer_ignored_connection_unknown", f"connection_id={connection_id}; chat_id={message.chat.id}")
         return
+
+    # Try to resolve the gift title from public page metadata; fallback to URL slug.
+    _, nft_title = await get_nft_preview(nft_url)
+    if not nft_title:
+        slug = urlparse(nft_url).path.rstrip("/").split("/")[-1]
+        nft_title = re.sub(r"-\d+$", "", slug).replace("-", " ") or "NFT-подарок"
+    nft_title = re.sub(r"\s+", " ", nft_title).strip()[:150]
 
     try:
         await bot.delete_business_messages(business_connection_id=connection_id, message_ids=[message.message_id])
-        event("ofer_command_deleted", f"connection_id={connection_id}; chat_id={message.chat.id}")
+        event("offer_command_deleted", f"connection_id={connection_id}; chat_id={message.chat.id}")
     except Exception as exc:
-        log.warning("Could not delete command: %s", exc)
+        log.warning("Could not delete offer command: %s", exc)
         event("delete_command_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; error={exc}")
 
-    # Variants that request media attempt to download the preview locally first.
-    media_variants = {1, 3, 5, 7, 9, 10}
-    image_url, nft_title = (None, None)
-    image_bytes = None
-    if variant in media_variants:
-        image_url, nft_title = await get_nft_preview(nft_url)
-        if image_url:
-            try:
-                timeout = aiohttp.ClientTimeout(total=12)
-                async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}) as session:
-                    async with session.get(image_url, allow_redirects=True) as response:
-                        if response.status == 200 and response.headers.get("Content-Type", "").lower().startswith("image/"):
-                            data = await response.read()
-                            if data and len(data) <= 10 * 1024 * 1024:
-                                from aiogram.types import BufferedInputFile
-                                suffix = ".jpg"
-                                ctype = response.headers.get("Content-Type", "").lower()
-                                if "png" in ctype: suffix = ".png"
-                                elif "webp" in ctype: suffix = ".webp"
-                                elif "gif" in ctype: suffix = ".gif"
-                                image_bytes = BufferedInputFile(data, filename="nft-preview" + suffix)
-            except Exception as exc:
-                log.info("Could not download preview image: %s", exc)
-
-    title = nft_title or "NFT-подарок"
-    escaped_title = html.escape(title)
-    escaped_url = html.escape(display_url, quote=True)
+    # Ordinary text (no bold styling). The NFT title is a clickable link.
+    safe_title = html.escape(nft_title)
+    safe_url_html = html.escape(nft_url, quote=True)
+    text_out = (
+        f'Пользователь {html.escape(message.from_user.full_name if message.from_user else "Пользователь")} '
+        f'предлагает Вам {amount} звёзд за подарок '
+        f'<a href="{safe_url_html}">{safe_title}</a>.\n\n'
+        'Предложение действует ещё 5ч 59минут.\n\n'
+        f'{safe_url_html}'
+    )
     keyboard = offer_keyboard(connection_id, message.chat.id, amount)
-
-    # Template matrix: keep variants 1-4 and add distinct 5-10 combinations.
-    if variant == 1:
-        card_text = f'<a href="{escaped_url}">{escaped_title}</a>'
-    elif variant == 2:
-        card_text = f"Пользователь предлагает NFT: {escaped_title} за {amount} ⭐ Telegram Stars.\nВыберите действие ниже."
-    elif variant == 3:
-        card_text = (f'<b>Предложение NFT</b>\n\n<a href="{escaped_url}">{escaped_title}</a>\n'
-                     f'Цена: <b>{amount} ⭐ Telegram Stars</b>\n\nПроверьте подарок и выберите действие.')
-    elif variant == 4:
-        card_text = f"Предложение NFT\n\n{title}\nЦена: {amount} ⭐ Telegram Stars\n\nПроверьте подарок и выберите действие."
-    elif variant == 5:
-        card_text = f"{title}\nПредложение: {amount} ⭐ Telegram Stars"
-    elif variant == 6:
-        card_text = f'Предложение NFT: <a href="{escaped_url}">{escaped_title}</a>\nЦена: {amount} ⭐'
-    elif variant == 7:
-        card_text = f'<b>🎁 Предложение подарка</b>\n\n<a href="{escaped_url}">{escaped_title}</a>\n<b>Цена: {amount} ⭐</b>\n\nВыберите действие.'
-    elif variant == 8:
-        card_text = f"🎁 ПРЕДЛОЖЕНИЕ\nПодарок: {title}\nСумма: {amount} ⭐\nСсылка: {display_url}"
-    elif variant == 9:
-        card_text = f'<b>Условия предложения</b>\n\n<a href="{escaped_url}">{escaped_title}</a>\nСумма: <b>{amount} ⭐</b>\nСтатус: ожидает ответа'
-    else:  # 10
-        card_text = f'<a href="{escaped_url}">{escaped_title}</a> — <b>{amount} ⭐</b>'
-
-    parse_mode = None if variant in (4, 5, 8) else ParseMode.HTML
     try:
-        if image_bytes is not None and variant in media_variants:
-            await bot.send_photo(
-                chat_id=message.chat.id,
-                business_connection_id=connection_id,
-                photo=image_bytes,
-                caption=card_text[:1024],
-                reply_markup=keyboard
-            )
-            preview = "yes"
-        else:
-            # Fallback to text instead of giving Telegram an inaccessible remote image URL.
-            await bot.send_message(
-                chat_id=message.chat.id,
-                business_connection_id=connection_id,
-                text=card_text,
-                reply_markup=keyboard,
-                parse_mode=parse_mode,
-                disable_web_page_preview=(variant in {2, 4, 5, 8})
-            )
-            preview = "no"
-        event("offer_sent", f"connection_id={connection_id}; chat_id={message.chat.id}; variant={variant}; amount={amount}; preview={preview}")
-        log.info("NFT offer sent chat=%s variant=%s amount=%s preview=%s", message.chat.id, variant, amount, preview)
+        # A visible URL is included so Telegram has a chance to build its native link preview.
+        # Whether t.me/nft pages render a gift preview depends on Telegram's own support.
+        await bot.send_message(
+            chat_id=message.chat.id,
+            business_connection_id=connection_id,
+            text=text_out,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=False,
+        )
+        event("offer_sent", f"connection_id={connection_id}; chat_id={message.chat.id}; command=offer; amount={amount}; preview=requested")
+        log.info("Offer sent chat=%s amount=%s", message.chat.id, amount)
     except Exception as exc:
-        log.exception("Could not send NFT offer")
-        event("offer_send_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; variant={variant}; error={exc}")
+        log.exception("Could not send offer")
+        event("offer_send_failed", f"connection_id={connection_id}; chat_id={message.chat.id}; command=offer; error={exc}")
 
 @dp.callback_query(F.data.startswith("nft:"))
 async def nft_callback(call: CallbackQuery):
